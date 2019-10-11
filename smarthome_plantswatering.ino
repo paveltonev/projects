@@ -3,7 +3,6 @@
 #include <RtcDS1302.h>
 // DHT11 sensor for temperature and humidity
 #include <DHTesp.h>
-#include <Ticker.h>
 // LCD display
 #include <LiquidCrystal_I2C.h>
 // WiFi modules
@@ -11,59 +10,56 @@
 #include <WebServer.h>
 
 // RTC clock instance
-const uint8_t RTC_DATA_PIN=4;
-const uint8_t RTC_CLK_PIN=5;
-const uint8_t RTC_RESET_PIN=2;
-ThreeWire myWire(RTC_DATA_PIN,RTC_CLK_PIN,RTC_RESET_PIN);
-RtcDS1302<ThreeWire> Rtc(myWire);
-unsigned long lastRTCTime=0;
-const int RTC_CHECK_TIME=60000;
-String hour;
-String minute;
+#define RTC_DATA_PIN 4
+#define RTC_CLK_PIN 5
+#define RTC_RESET_PIN 2
 
+#define RTC_CHECK_TIME 60000
+uint8_t month=-1;
+uint8_t day=-1;
+int year=-1;
+uint8_t hour=-1;
+uint8_t minute=-1;
+    
 // LCD display instance
-const uint8_t LCD_COLS = 16;
-const uint8_t LCD_ROWS = 2;
+#define LCD_COLS 16
+#define LCD_ROWS 2
 LiquidCrystal_I2C lcd(0x27, LCD_COLS, LCD_ROWS); 
 // LCD print data
 boolean print=true;
-unsigned long lastPrintTime=0;
-const int PRINT_TIME=2000;
+#define LCD_PRINT_TIME 2000
 
-const uint8_t DHT_DATA_PIN=18;
-// DHT11 sensor instance
-DHTesp dht;
-ComfortState cf;
+#define DHT_DATA_PIN 19
 
 // DHT data
-String temperature;
-String humidity;
-String hIndex;
-String dPoint;
-String cfStatus;
+int temperature=-1;
+int humidity=-1;
+float hIndex=-1;
+float dPoint=-1;
+String cfStatus="N/A";
 
-unsigned long lastDHTTime=0;
-const int DHT_CHECK_TIME=60000;
+#define DHT_CHECK_TIME 60000
 
-const uint8_t OUT_FLOWMETER_PIN=15;
+#define OUT_FLOWMETER_PIN 15
 boolean outPressed=false;
-unsigned long outLastTime=0;
-const uint8_t OUT_BUTTON_PIN=34;
-const uint8_t OUT_BUTTON_STATUS_PIN=32;
+
+#define OUT_BUTTON_PIN 34
+#define OUT_BUTTON_STATUS_PIN 32
 
 const uint8_t WATER_MIN_VALUE=0;
 const uint8_t WATER_MAX_VALUE=60;
 const uint8_t WATERING_DOSE=20;
-uint8_t flowPulses=WATER_MAX_VALUE;
+portMUX_TYPE muxFlow = portMUX_INITIALIZER_UNLOCKED;
+volatile int flowPulses=WATER_MAX_VALUE;
 
-const uint8_t SOLENDOIDVALVE_PIN=14;
-const uint8_t PUMP_PIN=12;
+#define SOLENDOIDVALVE_PIN 14
+#define PUMP_PIN 12
 
-const uint8_t IN_BUTTON_PIN=35;
+#define  IN_BUTTON_PIN 35
+
 boolean inPressed=false;
-unsigned long inLastTime=0;
-const uint8_t IN_BUTTON_STATUS_PIN=33;
-const uint8_t IN_FLOWMETER_PIN=25;
+#define IN_BUTTON_STATUS_PIN 33
+#define IN_FLOWMETER_PIN 25
 
 /* Put your SSID & Password */
 const char* ssid = "PVT";  // Enter SSID here
@@ -76,38 +72,57 @@ IPAddress subnet(255,255,255,0);
 
 WebServer server(80);
 
-const boolean useSerial=true;
+const boolean useSerial=false;
+//const boolean useSerial=true;
 
+// ------------------ RTC -----------------------//
+/** Task handle for RTC value read task */
+TaskHandle_t rtcTaskHandle = NULL;
+ThreeWire myWire(RTC_DATA_PIN,RTC_CLK_PIN,RTC_RESET_PIN);
+RtcDS1302<ThreeWire> Rtc(myWire);
 
-void initLCD() {
-  lcd.init();
-  lcd.backlight();
+void loadRTC(const RtcDateTime& dt) {
+  if (!dt.IsValid()) {
+    month=-1;
+    day=-1;
+    year=-1;
+    hour=-1;
+    minute=-1;
+  } else {
+    month=dt.Month();
+    day=dt.Day();
+    year=dt.Year();
+    hour=dt.Hour();
+    minute=dt.Minute();
+  }
+  if (useSerial) {
+    Serial.println(String(month) + ":" + String(day) + ":" + String(year) + ":" + String(hour) + ":" + String(minute));
+    Serial.println("RTC loaded");
+  }
+  print=true;
 }
 
-char ds[20]="";
-void loadDT(const RtcDateTime& dt) {
-  if (!dt.IsValid()) {
-    bzero(ds,20);
-    strcat(ds, "RTC Error");
-  } else {
-    snprintf_P(ds, 
-            (sizeof(ds) / sizeof(ds[0])),
-            PSTR("%02u/%02u/%04u %02u:%02u:%02u"),
-            dt.Month(),
-            dt.Day(),
-            dt.Year(),
-            dt.Hour(),
-            dt.Minute(),
-            dt.Second() );
-    hour=String(dt.Hour());
-    minute=String(dt.Minute());
+/**
+ * Task to reads RTC data
+ * @param pvParameters
+ *    pointer to task parameters
+ */
+void rtcTask(void *pvParameters) {
+  if (useSerial) {
+    String taskMessage = "RTC(Time) retrieval task running on core ";
+    taskMessage = taskMessage + xPortGetCoreID();
+    Serial.println(taskMessage);
+  }
+  while (1) {
+    loadRTC(Rtc.GetDateTime());
+    vTaskDelay(RTC_CHECK_TIME);
   }
 }
 
 void initRTC() {
     Rtc.Begin();
     RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
-    loadDT(compiled);
+    loadRTC(compiled);
     if (!Rtc.IsDateTimeValid()) {
         // Common Causes:
         //    1) first time you ran and the device wasn't running yet
@@ -148,14 +163,24 @@ void initRTC() {
           Serial.println("RTC is the same as compile time! (not expected but all is fine)");
         }
     }
+
+    // Start task to get RTC data
+    xTaskCreatePinnedToCore(
+        rtcTask,                       /* Function to implement the task */
+        "rtcTask ",                    /* Name of the task */
+        4000,                           /* Stack size in words */
+        NULL,                           /* Task input parameter */
+        5,                              /* Priority of the task */
+        &rtcTaskHandle,                /* Task handle. */
+        0);                             /* Core where the task should run */
 }
 
-void initDHT() {
-  pinMode(DHT_DATA_PIN, INPUT);
-  dht.setup(DHT_DATA_PIN, DHTesp::DHT11);
-}
-
-
+// ------------------ DHT11 -----------------------//
+/** Task handle for the light value read task */
+TaskHandle_t dht11TaskHandle = NULL;
+/** Comfort profile */
+ComfortState cf;
+DHTesp dht;
 
 void loadDHTData() {
   // Reading temperature for humidity takes about 250 milliseconds!
@@ -163,7 +188,9 @@ void loadDHTData() {
   TempAndHumidity newValues = dht.getTempAndHumidity();
   // Check if any reads failed and exit early (to try again).
   if (dht.getStatus() != 0) {
-    Serial.println("DHT11 error status: " + String(dht.getStatusString()));
+    if (useSerial) {
+      Serial.println("DHT11 error status: " + String(dht.getStatusString()));
+    }
     return;
   }
 
@@ -205,94 +232,72 @@ void loadDHTData() {
       break;
   };
 
-  temperature=String((int)newValues.temperature);
-  humidity=String((int)newValues.humidity);
-  hIndex=String(heatIndex);
-  dPoint=String(dewPoint);
+  temperature=(int)newValues.temperature;
+  if (temperature == 0) {
+    temperature = -2;
+  }
+  humidity=(int)newValues.humidity;
+  hIndex=heatIndex;
+  dPoint=dewPoint;
   cfStatus=comfortStatus;
-  Serial.println(" T:" + temperature + " H:" + humidity + " I:" + hIndex + " D:" + dPoint + " " + cfStatus);
+  if (useSerial) {
+    Serial.println(" T:" + String(temperature) + " H:" + String(humidity) + " I:" + String(hIndex) + " D:" + String(dPoint) + " " + cfStatus);
+    Serial.println("DHT11 data loaded");
+  }
+  print=true;
 }
 
-void IRAM_ATTR_outFlowmeterISR() {
-  if (outPressed && flowPulses > 0) {
-    flowPulses--;
-    if (flowPulses % WATERING_DOSE == 0) {
-      digitalWrite(SOLENDOIDVALVE_PIN, LOW);
-      if (flowPulses == 0) {
-        inLastTime = millis();
-        digitalWrite(LED_BUILTIN, HIGH);
-      }
-    }
-    print=true;
+/**
+ * Task to reads temperature from DHT11 sensor
+ * @param pvParameters
+ *    pointer to task parameters
+ */
+void dht11Task(void *pvParameters) {
+  if (useSerial) {
+    String taskMessage = "DHT11(Temperature, Humidity) task running on core ";
+    taskMessage = taskMessage + xPortGetCoreID();
+    Serial.println(taskMessage);
+  }
+  while (1) {
+    loadDHTData();
+    vTaskDelay(DHT_CHECK_TIME);
   }
 }
 
-void initOutFlowMeter() {
-  pinMode(OUT_FLOWMETER_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(OUT_FLOWMETER_PIN), IRAM_ATTR_outFlowmeterISR, RISING);
-}
-
-void IRAM_ATTR_outButtonISR() {
-  if (flowPulses > 0 && millis() - outLastTime > 50) {
-      outLastTime = millis();
-      outPressed = !outPressed;
-      if (outPressed) {
-        digitalWrite(SOLENDOIDVALVE_PIN, HIGH);
-        digitalWrite(OUT_BUTTON_STATUS_PIN, HIGH);
-      } else {
-        digitalWrite(SOLENDOIDVALVE_PIN, LOW);
-        digitalWrite(OUT_BUTTON_STATUS_PIN, LOW);
-      }
-      print=true;
-  }  
-}
-void initOutButton() {
-  pinMode(OUT_BUTTON_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(OUT_BUTTON_PIN), IRAM_ATTR_outButtonISR, RISING);
-}
-
-void IRAM_ATTR_inFlowmeterISR() {
-  if (inPressed && flowPulses < WATER_MAX_VALUE) {
-    flowPulses++;
-    if (flowPulses == WATER_MAX_VALUE) {
-      digitalWrite(PUMP_PIN, LOW);
-      digitalWrite(IN_BUTTON_STATUS_PIN, LOW);
-    }
-    print=true;
+void initDHT11() {
+  pinMode(DHT_DATA_PIN, INPUT);
+  dht.setup(DHT_DATA_PIN, DHTesp::DHT11);
+  if (useSerial) {
+    Serial.println("DHT11 initiated");
   }
+
+  // Start task to get temperature
+  xTaskCreatePinnedToCore(
+      dht11Task,                       /* Function to implement the task */
+      "dht11Task ",                    /* Name of the task */
+      4000,                           /* Stack size in words */
+      NULL,                           /* Task input parameter */
+      5,                              /* Priority of the task */
+      &dht11TaskHandle,                /* Task handle. */
+      1);                             /* Core where the task should run */
 }
 
-void initInFlowMeter() {
-  pinMode(IN_FLOWMETER_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(IN_FLOWMETER_PIN), IRAM_ATTR_inFlowmeterISR, RISING);
-}
-
-void IRAM_ATTR_inButtonISR() {
-  if (flowPulses == 0 && millis() - inLastTime > 50) {
-      inLastTime = millis();
-      inPressed = !inPressed;
-      if (inPressed) {
-        digitalWrite(PUMP_PIN, HIGH);
-        digitalWrite(IN_BUTTON_STATUS_PIN, HIGH);
-        digitalWrite(LED_BUILTIN, LOW);
-      } else {
-        digitalWrite(PUMP_PIN, LOW);
-        digitalWrite(IN_BUTTON_STATUS_PIN, LOW);
-      }
-  }  
-}
-void initInButton() {
-  pinMode(IN_BUTTON_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(IN_BUTTON_PIN), IRAM_ATTR_inButtonISR, RISING);
-}
-
-void printLCD(unsigned long t) {
-  if (print && (t - lastPrintTime) > PRINT_TIME) {
+// ------------------ LCD -----------------------//
+/** Task handle for LCD print task */
+TaskHandle_t lcdTaskHandle = NULL;
+void printLCD() {
+  if (print) {
+    if (useSerial) {
+      Serial.println("printLCD");
+    }
     int waterings = (WATER_MAX_VALUE-flowPulses)/WATERING_DOSE;
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print(hour);
     lcd.print(":");
+    if (minute < 10) {
+      lcd.print("0");
+    }
     lcd.print(minute);
     lcd.print(" ");
     lcd.print("T:");
@@ -306,15 +311,86 @@ void printLCD(unsigned long t) {
     lcd.print(waterings);
     lcd.print(" Tank=");    
     lcd.print(flowPulses);
-//    lcd.print("|");
-//    lcd.print(hIndex);
-//    lcd.print("|");
-//    lcd.print(dPoint);
     print=false;
-    lastPrintTime = t;
   }
 }
 
+/**
+ * Task to update LCD data
+ * @param pvParameters
+ *    pointer to task parameters
+ */
+void lcdTask(void *pvParameters) {
+  if (useSerial) {
+    String taskMessage = "LCD print task running on core ";
+    taskMessage = taskMessage + xPortGetCoreID();
+    Serial.println(taskMessage);
+  }
+  while (1) {
+    printLCD();
+    vTaskDelay(LCD_PRINT_TIME);
+  }
+}
+
+void initLCD() {
+  lcd.init();
+  lcd.backlight();
+  
+  // Start task to get RTC data
+  xTaskCreatePinnedToCore(
+      lcdTask,                       /* Function to implement the task */
+      "lcdTask ",                    /* Name of the task */
+      4000,                           /* Stack size in words */
+      NULL,                           /* Task input parameter */
+      5,                              /* Priority of the task */
+      &lcdTaskHandle,                /* Task handle. */
+      0);                             /* Core where the task should run */
+
+}
+// ----------------- Out Flowmeter --------------------------------//
+void IRAM_ATTR outFlowmeterInterrupt() {
+  portENTER_CRITICAL_ISR(&muxFlow);
+  if (outPressed && flowPulses > 0) {
+    flowPulses--;
+    if (flowPulses % WATERING_DOSE == 0) {
+      outPressed=false;
+      digitalWrite(SOLENDOIDVALVE_PIN, LOW);
+      digitalWrite(OUT_BUTTON_STATUS_PIN, LOW);
+      if (flowPulses == 0) {
+        digitalWrite(LED_BUILTIN, HIGH);
+      }
+    }
+    print=true;
+  }
+  portEXIT_CRITICAL_ISR(&muxFlow);
+}
+
+void initOutFlowMeter() {
+  pinMode(OUT_FLOWMETER_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(OUT_FLOWMETER_PIN), outFlowmeterInterrupt, FALLING);
+}
+
+// ----------------- In Flowmeter --------------------------------//
+void IRAM_ATTR inFlowmeterInterrupt() {
+  portENTER_CRITICAL_ISR(&muxFlow);
+  if (inPressed && flowPulses < WATER_MAX_VALUE) {
+    flowPulses++;
+    if (flowPulses == WATER_MAX_VALUE) {
+      inPressed=false;
+      digitalWrite(PUMP_PIN, LOW);
+      digitalWrite(IN_BUTTON_STATUS_PIN, LOW);
+    }
+    print=true;
+  }
+  portEXIT_CRITICAL_ISR(&muxFlow);
+}
+
+void initInFlowMeter() {
+  pinMode(IN_FLOWMETER_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(IN_FLOWMETER_PIN), inFlowmeterInterrupt, FALLING);
+}
+
+// ----------------- Pins mode --------------------------------//
 void initIO() {
   pinMode(OUT_BUTTON_STATUS_PIN, OUTPUT);
   pinMode(SOLENDOIDVALVE_PIN, OUTPUT);
@@ -327,37 +403,57 @@ void initAP() {
   WiFi.softAPConfig(local_ip, gateway, subnet);
   delay(100);
   
-  server.on("/", handle_OnConnect);
+  server.on("/status", handle_OnConnect);
   server.on("/wateron", handle_wateron);
   server.on("/wateroff", handle_wateroff);
-  //server.on("/pumpon", handle_pumpon);
-  //server.on("/pumpoff", handle_pumpoff);
+  server.on("/pumpon", handle_pumpon);
+  server.on("/pumpoff", handle_pumpoff);
   server.onNotFound(handle_NotFound);
   
   server.begin();
 }
 
 void handle_OnConnect() {
-  //digitalWrite(CONNECTION_STATUS_PIN, HIGH);
+  digitalWrite(LED_BUILTIN, HIGH);
   server.send(200, "text/html", SendHTML());
-  //digitalWrite(CONNECTION_STATUS_PIN, LOW);
+  digitalWrite(LED_BUILTIN, LOW);
 }
 void handle_wateron() {
-  //digitalWrite(CONNECTION_STATUS_PIN, HIGH);
-  //IRAM_ATTR_buttonISR();
+  digitalWrite(LED_BUILTIN, HIGH);
+  if (!outPressed) {
+    outButtonImpl();
+  }
   server.send(200, "text/html", SendHTML());
-  //digitalWrite(CONNECTION_STATUS_PIN, LOW);
+  digitalWrite(LED_BUILTIN, LOW);
 }
 void handle_wateroff() {
-  //digitalWrite(CONNECTION_STATUS_PIN, HIGH);
-  //IRAM_ATTR_buttonISR();
+  digitalWrite(LED_BUILTIN, HIGH);
+  if (outPressed) {
+    outButtonImpl();
+  }
   server.send(200, "text/html", SendHTML());
-  //digitalWrite(CONNECTION_STATUS_PIN, LOW);
+  digitalWrite(LED_BUILTIN, LOW);
+}
+void handle_pumpon() {
+  digitalWrite(LED_BUILTIN, HIGH);
+  if (!inPressed) {
+    inButtonImpl();
+  }
+  server.send(200, "text/html", SendHTML());
+  digitalWrite(LED_BUILTIN, LOW);
+}
+void handle_pumpoff() {
+  digitalWrite(LED_BUILTIN, HIGH);
+  if (inPressed) {
+    inButtonImpl();
+  }
+  server.send(200, "text/html", SendHTML());
+  digitalWrite(LED_BUILTIN, LOW);
 }
 void handle_NotFound(){
-  //digitalWrite(CONNECTION_STATUS_PIN, HIGH);
+  digitalWrite(LED_BUILTIN, HIGH);
   server.send(404, "text/plain", "Not found");
-  //digitalWrite(CONNECTION_STATUS_PIN, LOW);
+  digitalWrite(LED_BUILTIN, LOW);
 }
 String SendHTML(){
   String ptr = "<!DOCTYPE html> <html>\n";
@@ -375,23 +471,259 @@ String SendHTML(){
   ptr +="</head>\n";
   ptr +="<body>\n";
 
-//  if (ltrue) {
-//    uint8_t percentValue = flowPulses * 100 / ONE_LITER_PULSES;
-//    ptr +="<h1>Total waterings <b>" + String(wateringCount) + "</b></h1>\n";
-//    ptr +="<h3>Current watering status <b>" + String(percentValue) + "%</b></h3>\n";
-//  } else {
-//    ptr +="<h1>Filling the tank.</h1>\n";
-//  }
+  String timeS=String(month)+"/"+String(day)+"/"+String(year)+" "+String(hour)+":"+(minute<10 ? "0":"") + String(minute);
+  ptr +="<h1><b>" + timeS + "</b></h1>\n";
+  String weatherData="Temp:"+String(temperature)+" Hum:"+String(humidity)+" HotIndex:"+String(hIndex)+" DewPoint:"+String(dPoint)+" Status:" + cfStatus;
+  ptr +="<h1><b>" + weatherData + "</b></h1>\n";
+  ptr +="<h1>Tank capacity(litres) <b>" + String(WATER_MAX_VALUE) + "</b></h1>\n";
+  ptr +="<h1>Tank current status(litres) <b>" + String(WATER_MAX_VALUE-flowPulses) + "</b></h1>\n";
+  ptr +="<h1>Tank watering capacity(count) <b>" + String(WATER_MAX_VALUE/WATERING_DOSE) + "</b></h1>\n";
   
-   if(true) {
-      ptr +="<p>Watering: ON</p><a class=\"button button-off\" href=\"/wateroff\">OFF</a>\n";
-   } else {
-      ptr +="<p>Watering: OFF</p><a class=\"button button-on\" href=\"/wateron\">ON</a>\n";
-   }
+  int waterings = (WATER_MAX_VALUE-flowPulses)/WATERING_DOSE;
+  ptr +="<h1>Current waterings(count) <b>" + String(waterings) + "</b></h1>\n";
 
+  int precentValue = (WATER_MAX_VALUE - waterings * WATERING_DOSE - flowPulses)*100/WATERING_DOSE;
+  ptr +="<h3>Current watering status <b>" + String(precentValue) + "%</b></h3>\n";
+  
+  if(outPressed) {
+    ptr +="<p>Watering: ON</p><a class=\"button button-off\" href=\"/wateroff\">OFF</a>\n";
+  } else {
+     ptr +="<p>Watering: OFF</p><a class=\"button button-on\" href=\"/wateron\">ON</a>\n";
+  }
+
+  if(inPressed) {
+    ptr +="<p>Pump: ON</p><a class=\"button button-off\" href=\"/pumpoff\">OFF</a>\n";
+  } else {
+     ptr +="<p>Pump: OFF</p><a class=\"button button-on\" href=\"/pumpon\">ON</a>\n";
+  }
   ptr +="</body>\n";
   ptr +="</html>\n";
   return ptr;
+}
+
+#define DEBOUNCETIME 50
+
+// ----------- Out button interrupt section ----------- //
+volatile int outButtonInterrupts = 0;
+volatile bool outButtonLastState;
+volatile uint32_t outButtonDebounceTimeout = 0;
+
+// For setting up critical sections (enableinterrupts and disableinterrupts not available)
+// used to disable and interrupt interrupts
+
+portMUX_TYPE muxOut = portMUX_INITIALIZER_UNLOCKED;
+
+void outButtonImpl() {
+  // Out button business logic
+  if (flowPulses > 0) {
+    outPressed = !outPressed;
+    if (outPressed) {
+      digitalWrite(SOLENDOIDVALVE_PIN, HIGH);
+      digitalWrite(OUT_BUTTON_STATUS_PIN, HIGH);
+    } else {
+      digitalWrite(SOLENDOIDVALVE_PIN, LOW);
+      digitalWrite(OUT_BUTTON_STATUS_PIN, LOW);
+    }
+    print=true;
+  }
+}
+
+// Interrupt Service Routine - Keep it short!
+void IRAM_ATTR handleOutButtonInterrupt() {
+  portENTER_CRITICAL_ISR(&muxOut);
+  outButtonInterrupts++;
+  outButtonLastState = digitalRead(OUT_BUTTON_PIN);
+  outButtonDebounceTimeout = xTaskGetTickCount(); //version of millis() that works from interrupt
+  portEXIT_CRITICAL_ISR(&muxOut);
+}
+
+//
+// RTOS Task for reading button pushes (debounced)
+//
+void taskOutButtonRead( void * parameter) {
+  if (useSerial) {
+    String taskMessage = "Debounced ButtonRead Task running on core ";
+    taskMessage = taskMessage + xPortGetCoreID();
+    Serial.println(taskMessage);
+  }
+  // set up button Pin
+  pinMode (OUT_BUTTON_PIN, INPUT);
+  pinMode(OUT_BUTTON_PIN, INPUT_PULLUP);  // Pull up to 3.3V on input - some buttons already have this done
+
+  attachInterrupt(digitalPinToInterrupt(OUT_BUTTON_PIN), handleOutButtonInterrupt, FALLING);
+  
+  uint32_t saveDebounceTimeout;
+  bool saveOutButtonLastState;
+  int save;
+
+  // Enter RTOS Task Loop
+  while (1) {
+
+    portENTER_CRITICAL_ISR(&muxOut); // so that value of outButtonInterrupts,l astState are atomic - Critical Section
+    save  = outButtonInterrupts;
+    saveDebounceTimeout = outButtonDebounceTimeout;
+    saveOutButtonLastState  = outButtonLastState;
+    portEXIT_CRITICAL_ISR(&muxOut); // end of Critical Section
+
+    bool currentState = digitalRead(OUT_BUTTON_PIN);
+
+    // This is the critical IF statement
+    // if Interrupt Has triggered AND Button Pin is in same state AND the debounce time has expired THEN you have the button push!
+    //
+    if ((save != 0) //interrupt has triggered
+        && (currentState == saveOutButtonLastState) // pin is still in the same state as when intr triggered
+        && (millis() - saveDebounceTimeout > DEBOUNCETIME ))
+    { // and it has been low for at least DEBOUNCETIME, then valid keypress
+
+      
+      if (currentState == LOW) {
+        outButtonImpl();
+        if (useSerial) {
+          Serial.printf("Button is pressed and debounced, current tick=%d\n", millis());
+        }
+      } else {
+        if (useSerial) {
+          Serial.printf("Button is released and debounced, current tick=%d\n", millis());
+        }
+      }
+      if (useSerial) {
+        Serial.printf("Button Interrupt Triggered %d times, current State=%u, time since last trigger %dms\n", save, currentState, millis() - saveDebounceTimeout);
+      }
+
+      portENTER_CRITICAL_ISR(&muxOut); // can't change it unless, atomic - Critical section
+      outButtonInterrupts = 0; // acknowledge keypress and reset interrupt counter
+      portEXIT_CRITICAL_ISR(&muxOut);
+
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
+/** Task handle for out button press events read task */
+TaskHandle_t outButtonTaskHandle = NULL;
+void initOutButton() {
+  // Start task to get out button press events
+  xTaskCreatePinnedToCore(
+      taskOutButtonRead,              /* Function to implement the task */
+      "outButtonTask",                /* Name of the task */
+      4000,                           /* Stack size in words */
+      NULL,                           /* Task input parameter */
+      5,                              /* Priority of the task */
+      &outButtonTaskHandle,           /* Task handle. */
+      0);                             /* Core where the task should run */
+}
+
+// ----------- In button interrupt section ----------- //
+volatile int inButtonInterrupts = 0;
+volatile bool inButtonLastState;
+volatile uint32_t inButtonDebounceTimeout = 0;
+
+// For setting up critical sections (enableinterrupts and disableinterrupts not available)
+// used to disable and interrupt interrupts
+
+portMUX_TYPE muxIn = portMUX_INITIALIZER_UNLOCKED;
+
+void inButtonImpl() {
+  // In button business logic
+  if (flowPulses < WATER_MAX_VALUE) {
+  //if (flowPulses == 0) {
+    inPressed = !inPressed;
+    if (inPressed) {
+      digitalWrite(PUMP_PIN, HIGH);
+      digitalWrite(IN_BUTTON_STATUS_PIN, HIGH);
+      digitalWrite(LED_BUILTIN, LOW);
+    } else {
+      digitalWrite(PUMP_PIN, LOW);
+      digitalWrite(IN_BUTTON_STATUS_PIN, LOW);
+    }
+  }
+}
+
+// Interrupt Service Routine - Keep it short!
+void IRAM_ATTR handleInButtonInterrupt() {
+  portENTER_CRITICAL_ISR(&muxIn);
+  inButtonInterrupts++;
+  inButtonLastState = digitalRead(IN_BUTTON_PIN);
+  inButtonDebounceTimeout = xTaskGetTickCount(); //version of millis() that works from interrupt
+  portEXIT_CRITICAL_ISR(&muxIn);
+}
+
+//
+// RTOS Task for reading button pushes (debounced)
+//
+void taskInButtonRead( void * parameter) {
+  if (useSerial) {
+    String taskMessage = "Debounced ButtonRead Task running on core ";
+    taskMessage = taskMessage + xPortGetCoreID();
+    Serial.println(taskMessage);
+  }
+  // set up button Pin
+  pinMode (IN_BUTTON_PIN, INPUT);
+  pinMode(IN_BUTTON_PIN, INPUT_PULLUP);  // Pull up to 3.3V on input - some buttons already have this done
+
+  attachInterrupt(digitalPinToInterrupt(IN_BUTTON_PIN), handleInButtonInterrupt, FALLING);
+  
+  uint32_t saveDebounceTimeout;
+  bool saveInButtonLastState;
+  int save;
+
+  // Enter RTOS Task Loop
+  while (1) {
+
+    portENTER_CRITICAL_ISR(&muxIn); // so that value of outButtonInterrupts,l astState are atomic - Critical Section
+    save  = inButtonInterrupts;
+    saveDebounceTimeout = inButtonDebounceTimeout;
+    saveInButtonLastState  = inButtonLastState;
+    portEXIT_CRITICAL_ISR(&muxIn); // end of Critical Section
+
+    bool currentState = digitalRead(IN_BUTTON_PIN);
+
+    // This is the critical IF statement
+    // if Interrupt Has triggered AND Button Pin is in same state AND the debounce time has expired THEN you have the button push!
+    //
+    if ((save != 0) //interrupt has triggered
+        && (currentState == saveInButtonLastState) // pin is still in the same state as when intr triggered
+        && (millis() - saveDebounceTimeout > DEBOUNCETIME ))
+    { // and it has been low for at least DEBOUNCETIME, then valid keypress
+
+      if (currentState == LOW) {
+        inButtonImpl();
+        if (useSerial) {
+          Serial.printf("Button is pressed and debounced, current tick=%d\n", millis());
+        }
+      } else {
+        if (useSerial) {
+          Serial.printf("Button is released and debounced, current tick=%d\n", millis());
+        }
+      }
+      if (useSerial) {
+        Serial.printf("Button Interrupt Triggered %d times, current State=%u, time since last trigger %dms\n", save, currentState, millis() - saveDebounceTimeout);
+      }
+      
+      portENTER_CRITICAL_ISR(&muxIn); // can't change it unless, atomic - Critical section
+      inButtonInterrupts = 0; // acknowledge keypress and reset interrupt counter
+      portEXIT_CRITICAL_ISR(&muxIn);
+
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
+/** Task handle for in button press events read task */
+TaskHandle_t inButtonTaskHandle = NULL;
+
+void initInButton() {
+  // Start task to get in button press events
+  xTaskCreatePinnedToCore(
+      taskInButtonRead,               /* Function to implement the task */
+      "inButtonTask",                 /* Name of the task */
+      4000,                           /* Stack size in words */
+      NULL,                           /* Task input parameter */
+      5,                              /* Priority of the task */
+      &inButtonTaskHandle,           /* Task handle. */
+      1);                             /* Core where the task should run */
 }
 
 void setup() {
@@ -399,33 +731,25 @@ void setup() {
     Serial.begin(9600);
   }
   initIO();
-  initLCD();
-  initRTC();
-  initDHT();
+  initRTC(); // core 0
+  initDHT11(); // core 0
   initOutFlowMeter();
-  initOutButton();
+  initOutButton(); // core 1
   initInFlowMeter();
-  initInButton();
-//  initAP();  
+  initInButton(); // core 1
+  initAP(); // core 1
+  initLCD(); // core 0
+}
+
+void setup1() {
+  if (useSerial) {
+    Serial.begin(9600);
+  }
+  
+  initAP(); // core 1
 }
 
 void loop() {
-
-  unsigned long t=millis();
-  if(t-lastRTCTime>RTC_CHECK_TIME || lastRTCTime == 0) {
-    loadDT(Rtc.GetDateTime());
-    lastRTCTime=t;
-    print=true;
-  }
-  if(t-lastDHTTime>DHT_CHECK_TIME || lastDHTTime == 0) {
-    if (lastDHTTime == 0) {
-      delay(2000);//just for the first time
-    }
-    loadDHTData();
-    lastDHTTime=t;
-    print=true;
-  }
-  
-  printLCD(t);
-  delay(1000);
+  server.handleClient();
+  delay(2000);
 }
