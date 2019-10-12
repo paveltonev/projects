@@ -14,12 +14,13 @@
 #define RTC_CLK_PIN 5
 #define RTC_RESET_PIN 2
 
-#define RTC_CHECK_TIME 60000
+#define RTC_CHECK_TIME 30000
 uint8_t month=-1;
 uint8_t day=-1;
 int year=-1;
 uint8_t hour=-1;
 uint8_t minute=-1;
+uint8_t second=-1;
     
 // LCD display instance
 #define LCD_COLS 16
@@ -28,7 +29,6 @@ LiquidCrystal_I2C lcd(0x27, LCD_COLS, LCD_ROWS);
 // LCD print data
 boolean print=true;
 #define LCD_PRINT_TIME 2000
-
 #define DHT_DATA_PIN 19
 
 // DHT data
@@ -72,14 +72,15 @@ IPAddress subnet(255,255,255,0);
 
 WebServer server(80);
 
-const boolean useSerial=false;
-//const boolean useSerial=true;
+//const boolean useSerial=false;
+const boolean useSerial=true;
 
 // ------------------ RTC -----------------------//
 /** Task handle for RTC value read task */
 TaskHandle_t rtcTaskHandle = NULL;
 ThreeWire myWire(RTC_DATA_PIN,RTC_CLK_PIN,RTC_RESET_PIN);
 RtcDS1302<ThreeWire> Rtc(myWire);
+RtcDateTime scheduledDT=NULL;
 
 void loadRTC(const RtcDateTime& dt) {
   if (!dt.IsValid()) {
@@ -88,18 +89,24 @@ void loadRTC(const RtcDateTime& dt) {
     year=-1;
     hour=-1;
     minute=-1;
+    second=-1;
   } else {
     month=dt.Month();
     day=dt.Day();
     year=dt.Year();
     hour=dt.Hour();
     minute=dt.Minute();
+    second=dt.Second();
   }
   if (useSerial) {
     Serial.println(String(month) + ":" + String(day) + ":" + String(year) + ":" + String(hour) + ":" + String(minute));
     Serial.println("RTC loaded");
   }
   print=true;
+  if (scheduledDT != NULL && scheduledDT.TotalSeconds64() < dt.TotalSeconds64()) {
+    outButtonImpl();
+    scheduledDT=NULL;
+  }
 }
 
 /**
@@ -408,6 +415,7 @@ void initAP() {
   server.on("/wateroff", handle_wateroff);
   server.on("/pumpon", handle_pumpon);
   server.on("/pumpoff", handle_pumpoff);
+  server.on("/schedule", handle_schedule);
   server.onNotFound(handle_NotFound);
   
   server.begin();
@@ -451,14 +459,57 @@ void handle_pumpoff() {
   digitalWrite(LED_BUILTIN, LOW);
 }
 void handle_NotFound(){
+
   digitalWrite(LED_BUILTIN, HIGH);
-  server.send(404, "text/plain", "Not found");
+  String message = "Received parameters\n\n";
+  message += "URI: ";
+  message += server.uri();
+  message += "\nMethod: ";
+  message += (server.method() == HTTP_GET) ? "GET" : "POST";
+  message += "\nArguments: ";
+  message += server.args();
+  message += "\n";
+
+  for (uint8_t i = 0; i < server.args(); i++) {
+    message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
+  }
+  server.send(404, "text/plain", message);
   digitalWrite(LED_BUILTIN, LOW);
 }
+
+
+
+void handle_schedule() {
+  digitalWrite(LED_BUILTIN, HIGH);
+  String dateS="";
+  String timeS="";
+  for (uint8_t i = 0; i < server.args(); i++) {
+    String a=server.argName(i);
+    String v=server.arg(i);
+    if (strcmp("Date", a.c_str()) == 0) {
+      dateS=v;
+    } else if (strcmp("Time", a.c_str()) == 0) {
+      timeS=v;
+    }
+  }
+
+  if (dateS == "" && timeS == "") {
+    scheduledDT=NULL;
+  } else {
+    scheduledDT=RtcDateTime(dateS.c_str(), timeS.c_str());
+  }
+  //server.sendHeader("Location","/status");
+  server.send(200, "text/html", SendHTML());
+  digitalWrite(LED_BUILTIN, LOW);
+}
+
+char months[12][4] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+
 String SendHTML(){
   String ptr = "<!DOCTYPE html> <html>\n";
   ptr +="<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
   ptr +="<title>Watering System Control</title>\n";
+  ptr +="<meta http-equiv=\"refresh\" content=\"10\">";
   ptr +="<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}\n";
   ptr +="body{margin-top: 50px;} h1 {color: #444444;margin: 50px auto 30px;} h3 {color: #444444;margin-bottom: 50px;}\n";
   ptr +=".button {display: block;width: 80px;background-color: #3498db;border: none;color: white;padding: 13px 30px;text-decoration: none;font-size: 25px;margin: 0px auto 35px;cursor: pointer;border-radius: 4px;}\n";
@@ -471,7 +522,7 @@ String SendHTML(){
   ptr +="</head>\n";
   ptr +="<body>\n";
 
-  String timeS=String(month)+"/"+String(day)+"/"+String(year)+" "+String(hour)+":"+(minute<10 ? "0":"") + String(minute);
+  String timeS=String(months[month-1])+" "+(day<10 ? "0":"")+String(day)+" "+String(year)+"-"+(hour<10 ? "0":"")+String(hour)+":"+(minute<10 ? "0":"")+String(minute)+":"+(second<10 ? "0":"")+String(second);
   ptr +="<h1><b>" + timeS + "</b></h1>\n";
   String weatherData="Temp:"+String(temperature)+" Hum:"+String(humidity)+" HotIndex:"+String(hIndex)+" DewPoint:"+String(dPoint)+" Status:" + cfStatus;
   ptr +="<h1><b>" + weatherData + "</b></h1>\n";
@@ -496,6 +547,24 @@ String SendHTML(){
   } else {
      ptr +="<p>Pump: OFF</p><a class=\"button button-on\" href=\"/pumpon\">ON</a>\n";
   }
+
+  if (scheduledDT != NULL) {
+    uint8_t m=scheduledDT.Month();
+    uint8_t d=scheduledDT.Day();
+    int y=scheduledDT.Year();
+    uint8_t h=scheduledDT.Hour();
+    uint8_t mnt=scheduledDT.Minute();
+    uint8_t s=scheduledDT.Second();
+    
+    String scheduledTime=String(months[m-1])+" "+(d<10 ? "0":"")+String(d)+" "+String(y)+"-"+(h<10 ? "0":"")+String(h)+":"+(mnt<10 ? "0":"")+String(mnt)+":"+(s<10 ? "0":"")+String(s);
+    ptr +="<h1>Watering scheduled at <b>" + scheduledTime + "</b></h1>\n";
+  }
+  ptr +="<form action=\"/schedule\">\n";
+  ptr +="Date: <input type=\"text\" name=\"Date\"><br>\n";
+  ptr +="Time: <input type=\"text\" name=\"Time\"><br>\n";
+  ptr +="<input type=\"submit\" value=\"Schedule\">\n";
+  ptr +="</form>\n";
+  
   ptr +="</body>\n";
   ptr +="</html>\n";
   return ptr;
@@ -751,5 +820,5 @@ void setup1() {
 
 void loop() {
   server.handleClient();
-  delay(2000);
+  delay(500);
 }
