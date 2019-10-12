@@ -72,8 +72,8 @@ IPAddress subnet(255,255,255,0);
 
 WebServer server(80);
 
-//const boolean useSerial=false;
-const boolean useSerial=true;
+const boolean useSerial=false;
+//const boolean useSerial=true;
 
 // ------------------ RTC -----------------------//
 /** Task handle for RTC value read task */
@@ -509,7 +509,7 @@ String SendHTML(){
   String ptr = "<!DOCTYPE html> <html>\n";
   ptr +="<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
   ptr +="<title>Watering System Control</title>\n";
-  ptr +="<meta http-equiv=\"refresh\" content=\"10\">";
+  //ptr +="<meta http-equiv=\"refresh\" content=\"10\">";
   ptr +="<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}\n";
   ptr +="body{margin-top: 50px;} h1 {color: #444444;margin: 50px auto 30px;} h3 {color: #444444;margin-bottom: 50px;}\n";
   ptr +=".button {display: block;width: 80px;background-color: #3498db;border: none;color: white;padding: 13px 30px;text-decoration: none;font-size: 25px;margin: 0px auto 35px;cursor: pointer;border-radius: 4px;}\n";
@@ -525,16 +525,19 @@ String SendHTML(){
   String timeS=String(months[month-1])+" "+(day<10 ? "0":"")+String(day)+" "+String(year)+"-"+(hour<10 ? "0":"")+String(hour)+":"+(minute<10 ? "0":"")+String(minute)+":"+(second<10 ? "0":"")+String(second);
   ptr +="<h1><b>" + timeS + "</b></h1>\n";
   String weatherData="Temp:"+String(temperature)+" Hum:"+String(humidity)+" HotIndex:"+String(hIndex)+" DewPoint:"+String(dPoint)+" Status:" + cfStatus;
-  ptr +="<h1><b>" + weatherData + "</b></h1>\n";
-  ptr +="<h1>Tank capacity(litres) <b>" + String(WATER_MAX_VALUE) + "</b></h1>\n";
-  ptr +="<h1>Tank current status(litres) <b>" + String(WATER_MAX_VALUE-flowPulses) + "</b></h1>\n";
-  ptr +="<h1>Tank watering capacity(count) <b>" + String(WATER_MAX_VALUE/WATERING_DOSE) + "</b></h1>\n";
+  ptr +="<h2><b>" + weatherData + "</b></h2>\n";
+  ptr +="<h2>Tank capacity(litres) <b>" + String(WATER_MAX_VALUE) + "</b></h2>\n";
+  ptr +="<h2>Tank current status(litres) <b>" + String(flowPulses) + "</b></h2>\n";
+  ptr +="<h2>Tank current watering capacity(count) <b>" + String(WATER_MAX_VALUE/WATERING_DOSE) + "</b></h2>\n";
   
   int waterings = (WATER_MAX_VALUE-flowPulses)/WATERING_DOSE;
-  ptr +="<h1>Current waterings(count) <b>" + String(waterings) + "</b></h1>\n";
+  ptr +="<h2>Executed waterings(count) <b>" + String(waterings) + "</b></h2>\n";
 
-  int precentValue = (WATER_MAX_VALUE - waterings * WATERING_DOSE - flowPulses)*100/WATERING_DOSE;
-  ptr +="<h3>Current watering status <b>" + String(precentValue) + "%</b></h3>\n";
+  ptr +="<h2>Watering dose(litres) <b>" + String(WATERING_DOSE) + "</b></h2>\n";
+  int currentWateringLitres = WATER_MAX_VALUE - waterings * WATERING_DOSE - flowPulses;
+  ptr +="<h2>Current watering status(litres) <b>" + String(currentWateringLitres) + "</b></h2>\n";
+  int precentValue = currentWateringLitres*100/WATERING_DOSE;
+  ptr +="<h2>Current watering status(percent) <b>" + String(precentValue) + "%</b></h2>\n";
   
   if(outPressed) {
     ptr +="<p>Watering: ON</p><a class=\"button button-off\" href=\"/wateroff\">OFF</a>\n";
@@ -557,7 +560,7 @@ String SendHTML(){
     uint8_t s=scheduledDT.Second();
     
     String scheduledTime=String(months[m-1])+" "+(d<10 ? "0":"")+String(d)+" "+String(y)+"-"+(h<10 ? "0":"")+String(h)+":"+(mnt<10 ? "0":"")+String(mnt)+":"+(s<10 ? "0":"")+String(s);
-    ptr +="<h1>Watering scheduled at <b>" + scheduledTime + "</b></h1>\n";
+    ptr +="<h2>Watering scheduled at <b>" + scheduledTime + "</b></h2>\n";
   }
   ptr +="<form action=\"/schedule\">\n";
   ptr +="Date: <input type=\"text\" name=\"Date\"><br>\n";
@@ -808,14 +811,6 @@ void setup() {
   initInButton(); // core 1
   initAP(); // core 1
   initLCD(); // core 0
-}
-
-void setup1() {
-  if (useSerial) {
-    Serial.begin(9600);
-  }
-  
-  initAP(); // core 1
 }
 
 void loop() {
